@@ -1,0 +1,28 @@
+.{
+    .name = "vhultman-raytracer",
+    .version = "0.0.0",
+
+    .dependencies = .{
+        .zgltf = .{
+            .url = "git+https://github.com/kooparse/zgltf.git#c05471bfcd49d2a2bcbc4e1273e2cb4f972461d1",
+            .hash = "1220531a8e6b1e3f45fae01cda2621e1c714694dffd93c97f21b74bea277be479a11",
+        },
+        .zglfw = .{
+            .url = "git+https://github.com/zig-gamedev/zglfw.git#52f5432f0bfb2e4b79248bf3f3710bb18a825579",
+            .hash = "1220074231fcf6556b27e0ac6a3b22a19062c0c4bc3fd77c6fdcede15303af824c27",
+        },
+        .zgui = .{
+            .url = "git+https://github.com/zig-gamedev/zgui.git#5e268ec8f19f640a064542429270737d2f19ad31",
+            .hash = "1220e4a659899a9b99eec44ed85280fd7a9d87b38587759d3b9a918619d491fe78b4",
+        },
+        .zstbi = .{
+            .url = "git+https://github.com/zig-gamedev/zstbi.git#bcbd249f3f57fb84d6d76f1bc621c7bd3bfaa4a2",
+            .hash = "12208b7d15a730294a7d8ee3a9d3ef145e109f94d0a68be7f0ee282e0630ede093d5",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

@@ -1,0 +1,8 @@
+Selectively apply roughness map and color in rt shader
+Make the rt shader TBN more effective to compute.
+Better sampling strategy.
+
+Features
+0. Support for cubemaps.
+1. Support for emisson
+2. Support for alpha blending
