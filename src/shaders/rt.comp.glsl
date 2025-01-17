@@ -26,10 +26,6 @@ uniform bool should_accumulate;
 layout (location = 6)
 uniform bool use_normal_maps;
 
-
-layout (binding = 1)
-uniform sampler2D temp_texture;
-
 struct BLASNode {
     vec3 aabb_min;
     int left_or_first;
@@ -107,7 +103,6 @@ layout (std430, binding = 3) restrict readonly buffer BLASIndexBuffer {
     int blas_index_buffer[];
 };
 
-
 layout (std430, binding = 4) restrict readonly buffer TLASNodeBuffer {
     TLASNode tlas_nodes[];
 };
@@ -116,12 +111,16 @@ layout (std430, binding = 5) restrict readonly buffer MeshTransformBuffer {
     mat4 mesh_transforms[];
 };
 
+layout (std430, binding = 6) restrict readonly buffer NormalMatrixBuffer {
+    mat3 normal_matricies[];
+};
+
 // NOTE: glTF "Primitive". Primitives consists of a single material and vertices.
-layout (std430, binding = 6) restrict readonly buffer PrimitiveBuffer {
+layout (std430, binding = 7) restrict readonly buffer PrimitiveBuffer {
     Primitive primitives[];
 };
 
-layout (std430, binding = 7) restrict readonly buffer MaterialBuffer {
+layout (std430, binding = 8) restrict readonly buffer MaterialBuffer {
     Material materials[];
 };
 
@@ -170,9 +169,15 @@ bool intersect_aabb(Ray r, vec3 box_min, vec3 box_max, out float t_min, out floa
     return t_min <= t_max && t_max >= 0.0;
 }
 
-bool intersect_triangle(vec3 orig, vec3 dir, vec3 v0, vec3 v1, vec3 v2, out float t, out vec2 barycentric) {
+bool intersect_triangle(vec3 orig, vec3 dir, vec3 v0, vec3 v1, vec3 v2, out float t, out vec2 barycentric, bool is_double_sided) {
     vec3 edge1 = v1 - v0;
     vec3 edge2 = v2 - v0; 
+
+    vec3 normal = cross(edge1, edge2);
+    if (!is_double_sided && dot(normal, dir) > 0) {
+        return false; // Skip back-facing triangles. Sponza essentially needs this for correct normals.
+    }
+
     vec3 h = cross(dir, edge2);
     float det = dot(edge1, h); 
     if (abs(det) < 1e-8) return false; 
@@ -222,6 +227,7 @@ Intersection hit_bvh(Ray r, int primitive_index) {
                 vec3 v2 = vertex_buffer[prim.base_vertex + index_buffer[index_buffer_index + 2]].position;
                 
 
+                bool doubled_sided = (materials[prim.material_idx].flags & 1) != 0;
                 if (intersect_triangle(
                     r.origin,
                     r.dir,
@@ -229,7 +235,8 @@ Intersection hit_bvh(Ray r, int primitive_index) {
                     v1,
                     v2,
                     t,
-                    barycentric
+                    barycentric,
+                    doubled_sided
                 ) && t < result.t) {
                     result.t = t;
                     result.index_buffer_idx = index_buffer_index;
@@ -315,203 +322,84 @@ Intersection hit_tlas(Ray r) {
     return result;
 }
 
-vec3 sample_cosine_hemisphere(vec2 xi, vec3 N) {
-    float phi = 2.0 * PI * xi.x;
-    float cos_theta = sqrt(xi.y);
-    float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-    
-    vec3 H;
-    H.x = sin_theta * cos(phi);
-    H.y = sin_theta * sin(phi);
-    H.z = cos_theta;
-    
-    vec3 up = abs(N.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
-    vec3 tangent = normalize(cross(up, N));
-    vec3 bitangent = cross(N, tangent);
-    
-    return tangent * H.x + bitangent * H.y + N * H.z;
-}
-
-vec3 sample_ggx(vec2 xi, float roughness, vec3 N) {
-    float alpha = roughness * roughness;
-    
-    float phi = 2.0 * PI * xi.x;
-    float cos_theta = sqrt((1.0 - xi.y) / (1.0 + (alpha*alpha - 1.0) * xi.y));
-    float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-    
-    vec3 H;
-    H.x = sin_theta * cos(phi);
-    H.y = sin_theta * sin(phi);
-    H.z = cos_theta;
-    
-    vec3 up = abs(N.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
-    vec3 tangent = normalize(cross(up, N));
-    vec3 bitangent = cross(N, tangent);
-    
-    return tangent * H.x + bitangent * H.y + N * H.z;
-}
-
-float D_GGX(float NdotH, float roughness) {
-    float alpha = max(0.001, roughness * roughness);
-    float alpha2 = alpha * alpha;
-    float denom = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
-    return alpha2 / (PI * denom * denom);
-}
-
-vec3 F_Schlick(float VdotH, vec3 F0) {
-    return F0 + (vec3(1.0) - F0) * pow(1.0 - VdotH, 5.0);
-}
-
-float G_Smith(float NdotV, float NdotL, float roughness) {
-    float alpha = roughness * roughness;
-    float k = alpha * 0.5;
-    float G1V = NdotV / (NdotV * (1.0 - k) + k);
-    float G1L = NdotL / (NdotL * (1.0 - k) + k);
-    return G1L * G1V;
-}
-
 vec3 sample_enviroment(Ray r) {
     vec3 unit_direction = normalize(r.dir);
     float a = 0.5*(unit_direction.y + 1.0);
     return (1.0-a) * vec3(1.0, 1.0, 1.0) + a * vec3(0.5, 0.7, 1.0);
 }
 
+vec2 get_uvs(vec3 barycentric, Vertex v0, Vertex v1, Vertex v2) { 
+    vec2 uv0 = vec2(v0.u, v0.v);
+    vec2 uv1 = vec2(v1.u, v1.v);
+    vec2 uv2 = vec2(v2.u, v2.v);
 
-vec3 eval(vec3 N, vec3 V, vec3 L, vec3 base_color, float metallic, float roughness, out float pdf) {
-    if (dot(N, L) <= 0.001 || dot(N, V) <= 0.001) {
-        pdf = 0.0;
-        return vec3(0.0);
-    }
-
-    vec3 H = normalize(L + V);
-    float NdotL = max(dot(N, L), 0.001);
-    float NdotV = max(dot(N, V), 0.001);
-    float NdotH = max(dot(N, H), 0.001);
-    float VdotH = max(dot(V, H), 0.001);
-    
-    float diffuse_ratio = 0.5 * (1.0 - metallic);
-    float specular_ratio = 1.0 - diffuse_ratio;
-    
-    vec3 F0 = mix(vec3(0.04), base_color, metallic);
-    vec3 F = F_Schlick(VdotH, F0);
-    float D = D_GGX(NdotH, roughness);
-    float G = G_Smith(NdotV, NdotL, roughness);
-    
-    vec3 diffuse = (1.0 - F) * (1.0 - metallic) * base_color * ONE_OVER_PI;
-    vec3 specular = (F * D * G) / max((4.0 * NdotV * NdotL), 1e-4);
-    
-    float pdf_diffuse = NdotL * ONE_OVER_PI;
-    float pdf_specular = D * NdotH / (4.0 * VdotH);
-    
-    pdf = diffuse_ratio * pdf_diffuse + specular_ratio * pdf_specular;
-    return diffuse + specular;
+    vec2 uv = barycentric.x * uv1 + barycentric.y * uv2 + barycentric.z * uv0;
+    return uv;
 }
 
-vec3 bsdf(vec3 N, vec3 V, out vec3 L, vec3 base_color, float metallic, float roughness, out float pdf) {
-    float diffuse_ratio = 0.5 * (1.0 - metallic);
-
-    if (random_float() < diffuse_ratio) {
-        L = sample_cosine_hemisphere(vec2(random_float(), random_float()), N);
-        return eval(N, V, L, base_color, metallic, roughness, pdf);
-    } else {
-        vec3 H = sample_ggx(vec2(random_float(), random_float()), roughness, N);
-        L = reflect(-V, H);
-        if (dot(N, L) <= 0.0) {
-            pdf = 0.0;
-            return vec3(0);
-        }
-        return eval(N, V, L, base_color, metallic, roughness, pdf);
-    }
-}
-
-vec3 get_base_color(uvec2 handle, vec2 uv, vec3 base_color_factor) {
-    if (handle.x == 0xffff && handle.y == 0xffff) {
-        return base_color_factor;
+vec3 get_normal(Material mat, int mesh_idx, vec2 uv, vec3 barycentric, Vertex v0, Vertex v1, Vertex v2) {
+    mat3 normal_matrix = normal_matricies[mesh_idx];
+    vec3 normal = normalize(barycentric.x * (normal_matrix * v1.normal) + barycentric.y * (normal_matrix * v2.normal) + barycentric.z * normal_matrix * v0.normal);  
+    if ((mat.flags & 2) == 0 || !use_normal_maps) {
+        return normal;
     }
 
-    return texture(sampler2D(handle), uv).xyz * base_color_factor;
-}
 
-vec3 get_metallic_roughness(uvec2 handle, vec2 uv) {
-    if (handle.x == 0xffff && handle.y == 0xffff) {
-        return vec3(1);
-    }
-
-    return texture(sampler2D(handle), uv).xyz;
-}
-
-// I officaly hate normals.
-vec3 get_normal(mat3 normal_matrix, uvec2 handle, vec2 uv, float u, float v, float w, Vertex v0, Vertex v1, Vertex v2, int flags) {
-    vec3 normal = normalize(u * (normal_matrix * v1.normal) + v * (normal_matrix * v2.normal) + w * normal_matrix * v0.normal);  
-    vec3 tangent = normalize(u * (normal_matrix * normalize(v1.tangent.xyz)) + v * (normal_matrix * normalize(v2.tangent.xyz)) + w * (normal_matrix * normalize(v0.tangent.xyz)));  
+    vec3 tangent = normalize(barycentric.x * (normal_matrix * v1.tangent.xyz) + barycentric.y * (normal_matrix * v2.tangent.xyz) + barycentric.z * (normal_matrix * v0.tangent.xyz));  
     vec3 bitangent = cross(normal, tangent) * v0.tangent.w; // Vertices of the same triangle SHOULD have the same tangent.w value. 
     mat3 TBN = mat3(tangent, bitangent, normal);
 
-    vec3 mapped_normal = texture(sampler2D(handle), uv).rgb * 2.0 - 1.0;
-    mapped_normal.g = -mapped_normal.g;
-    mapped_normal = normalize(TBN * mapped_normal);
+    vec3 mapped_normal = texture(sampler2D(mat.normal_map_texture), uv).rgb * 2.0 - 1.0;
 
-    return (flags != 0 && use_normal_maps) ? mapped_normal : normal;
+    return normalize(TBN * mapped_normal);
 }
 
-const int MAX_BOUNCES = 10;
+vec3 get_metallic_roughness(Material mat, vec2 uv) {
+    if ((mat.flags & 4) == 0) {
+        return vec3(1);
+    }
+
+    vec3 metallic_roughness = texture(sampler2D(mat.metallic_roughness_texture), uv).rgb;
+    return metallic_roughness;
+}
+
+vec3 get_base_color(Material mat, vec2 uv) {
+    if ((mat.flags & 8) == 0) {
+        return mat.base_color_factor.rgb;
+    }
+
+    return texture(sampler2D(mat.base_color_texture), uv).rgb * mat.base_color_factor.rgb;
+}
 
 vec3 trace(Ray r) {
     vec3 attenuation = vec3(1);
     vec3 result = vec3(0);
-    Intersection hit;
+    Intersection hit = hit_tlas(r);
 
-    for (int i = 0; i < MAX_BOUNCES; i++) {
-        if (i > 2) {
-            float p = max(max(attenuation.x, attenuation.y), attenuation.z);
-            p = max(0.1, min(0.9, p));
-            if (random_float() > p) {
-                break;
-            }
-            attenuation /= p;
-        }
-
-        hit = hit_tlas(r);
-        if (hit.t == 1e30) {
-            result += attenuation * sample_enviroment(r);
-            break;
-        }
-
-        Primitive prim = primitives[hit.prim_index];
-        Material mat = materials[prim.material_idx];
-
-        Vertex v0 = vertex_buffer[prim.base_vertex + index_buffer[hit.index_buffer_idx + 0]];
-        Vertex v1 = vertex_buffer[prim.base_vertex + index_buffer[hit.index_buffer_idx + 1]];
-        Vertex v2 = vertex_buffer[prim.base_vertex + index_buffer[hit.index_buffer_idx + 2]];
-        vec2 uv0 = vec2(v0.u, v0.v);
-        vec2 uv1 = vec2(v1.u, v1.v);
-        vec2 uv2 = vec2(v2.u, v2.v);
-
-        float w = (1 - (hit.u + hit.v));
-        vec2 uv = hit.u * uv1 + hit.v * uv2 + w * uv0;
-        vec3 base_color = get_base_color(mat.base_color_texture, uv, mat.base_color_factor.rgb);
-        vec3 metallic_roughness = get_metallic_roughness(mat.metallic_roughness_texture, uv);
-
-        float metallic = metallic_roughness.b * mat.metallic_factor;
-        float roughness = metallic_roughness.g * mat.roughness_factor;
-        roughness = max(roughness, 0.01);
-
-        mat3 normal_matrix = mat3(inverse(mesh_transforms[prim.mesh_idx]));
-        vec3 normal = get_normal(normal_matrix, mat.normal_map_texture, uv, hit.u, hit.v, w, v0, v1, v2, mat.flags);
-        //return (normal + 1) / 2;
-
-        vec3 outgoing_dir;
-        float pdf;
-        vec3 brdf = bsdf(normal, -r.dir, outgoing_dir, base_color, metallic, roughness, pdf);
-        if (pdf <= 0.0001) break;
-
-        attenuation *= brdf * max(dot(normal, outgoing_dir), 0.001) / pdf;
-
-        r.dir = outgoing_dir;
-        r.origin = r.origin + r.dir * hit.t + normal * 0.001;
+    if (hit.t == 1e30) {
+        return vec3(1, 1, 1);
     }
 
-    return result;
+    Primitive prim = primitives[hit.prim_index];
+    Material mat = materials[prim.material_idx];
+
+    Vertex v0 = vertex_buffer[prim.base_vertex + index_buffer[hit.index_buffer_idx + 0]];
+    Vertex v1 = vertex_buffer[prim.base_vertex + index_buffer[hit.index_buffer_idx + 1]];
+    Vertex v2 = vertex_buffer[prim.base_vertex + index_buffer[hit.index_buffer_idx + 2]];
+    vec3 barycentric = vec3(hit.u, hit.v, 1 - (hit.u + hit.v));
+    vec2 uv = get_uvs(barycentric, v0, v1, v2);
+
+    vec3 base_color = get_base_color(mat, uv);
+    vec3 normal = get_normal(mat, prim.mesh_idx, uv, barycentric, v0, v1, v2);
+    vec3 metallic_roughness = get_metallic_roughness(mat, uv);
+
+    float metallic = metallic_roughness.b * mat.metallic_factor;
+    float roughness = max(metallic_roughness.g * mat.roughness_factor, 0.01);
+
+    //return (normal + 1) * 0.5;
+    //return vec3(roughness);
+
+    return base_color;
 }
 
 

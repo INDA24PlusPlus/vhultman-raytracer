@@ -40,6 +40,9 @@ extern fn glfwGetMonitorContentScale(window: *glfw.Monitor, x_scale: *f32, y_sca
 
 pub fn main() !void {
     var state: AppState = .{};
+    state.camera.yaw = std.math.degreesToRadians(180);
+    state.camera.pitch = 0;
+    state.camera.pos = .{ 3, 1.5, 0, 0 };
 
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
@@ -100,7 +103,7 @@ pub fn main() !void {
     std.debug.print("Loading models took {d}ms\n", .{@as(f64, @floatFromInt(end)) / std.time.ns_per_ms});
 
     const handles = scene_data.gpu_data.upload();
-    const primitive_buffer_handle, const mesh_transform_buffer_handle, const material_buffer_handle = try scene_data.uploadDataToGPU(gpa);
+    const primitive_buffer_handle, const mesh_transform_buffer_handle, const material_buffer_handle, const normal_matricies_handle = try scene_data.uploadDataToGPU(gpa);
     scene_data.geom_arena.deinit();
 
     const raster_state = try RasterState.init(handles.vbo, handles.ibo);
@@ -118,6 +121,7 @@ pub fn main() !void {
         .blas_index_buffer = handles.blas_index_buffer,
         .tlas_node_buffer = handles.tlas_nodes,
         .mesh_transform_buffer = mesh_transform_buffer_handle,
+        .normal_matricies = normal_matricies_handle,
         .primitive_buffer = primitive_buffer_handle,
         .material_buffer = material_buffer_handle,
     });
@@ -133,7 +137,7 @@ pub fn main() !void {
     defer zgui.backend.deinit();
 
     var esc_prev_pressed = false;
-    glfw.swapInterval(0);
+    glfw.swapInterval(1);
 
     state.current_time = @floatCast(glfw.getTime());
     while (!window.shouldClose()) {
@@ -205,9 +209,12 @@ fn buildGUI(state: *AppState, window: *glfw.Window) void {
 
     if (zgui.begin("Properties", .{})) {
         var cam_pos: [3]f32 = .{ state.camera.pos[0], state.camera.pos[1], state.camera.pos[2] };
-        var cam_forward: [3]f32 = .{ state.camera.forward[0], state.camera.forward[1], state.camera.forward[2] };
+        var pitch: f32 = std.math.radiansToDegrees(state.camera.pitch);
+        var yaw: f32 = std.math.radiansToDegrees(state.camera.yaw);
+
         if (zgui.inputFloat3("Camera position", .{ .v = &cam_pos })) {}
-        if (zgui.inputFloat3("Camera Forward", .{ .v = &cam_forward })) {}
+        _ = zgui.inputFloat("Pitch", .{ .v = &pitch });
+        _ = zgui.inputFloat("Yaw", .{ .v = &yaw });
         if (zgui.checkbox("Use normal mapping", .{ .v = &use_normal_map })) {}
 
         if (state.current_render_method == .Raytracing) {
@@ -282,6 +289,7 @@ const RTState = struct {
         blas_index_buffer: u32,
         tlas_node_buffer: u32,
         mesh_transform_buffer: u32,
+        normal_matricies: u32,
         primitive_buffer: u32,
         material_buffer: u32,
     };
@@ -390,8 +398,9 @@ const RTState = struct {
             const blas_index_buffer = 3;
             const tlas_node_buffer = 4;
             const mesh_transform_buffer = 5;
-            const primitive_buffer = 6;
-            const material_buffer = 7;
+            const normal_matricies = 6;
+            const primitive_buffer = 7;
+            const material_buffer = 8;
         };
 
         gl.bindBufferBase(gl.SHADER_STORAGE_BUFFER, buffer_bindings.vertex_buffer, rt_state.buffer_handles.vertex_buffer);
@@ -400,6 +409,7 @@ const RTState = struct {
         gl.bindBufferBase(gl.SHADER_STORAGE_BUFFER, buffer_bindings.blas_index_buffer, rt_state.buffer_handles.blas_index_buffer);
         gl.bindBufferBase(gl.SHADER_STORAGE_BUFFER, buffer_bindings.tlas_node_buffer, rt_state.buffer_handles.tlas_node_buffer);
         gl.bindBufferBase(gl.SHADER_STORAGE_BUFFER, buffer_bindings.mesh_transform_buffer, rt_state.buffer_handles.mesh_transform_buffer);
+        gl.bindBufferBase(gl.SHADER_STORAGE_BUFFER, buffer_bindings.normal_matricies, rt_state.buffer_handles.normal_matricies);
         gl.bindBufferBase(gl.SHADER_STORAGE_BUFFER, buffer_bindings.primitive_buffer, rt_state.buffer_handles.primitive_buffer);
         gl.bindBufferBase(gl.SHADER_STORAGE_BUFFER, buffer_bindings.material_buffer, rt_state.buffer_handles.material_buffer);
 
@@ -426,6 +436,7 @@ const RTState = struct {
         gl.programUniform1i(rt_state.fshader, 0, @intCast(rt_state.sample_index));
 
         gl.disable(gl.FRAMEBUFFER_SRGB);
+        gl.disable(gl.CULL_FACE);
 
         // TODO: Make this resiliant to resolution changes.
         gl.dispatchCompute(rt_state.render_texture_width / 8, rt_state.render_texture_height / 4, 1);
@@ -562,7 +573,7 @@ const RasterState = struct {
         gl.bindVertexArray(self.vao);
 
         // Turn on sRGB framebuffer for drawing scene.
-        gl.enable(gl.FRAMEBUFFER_SRGB);
+        //gl.enable(gl.FRAMEBUFFER_SRGB);
         for (scene_data.meshes.items) |*mesh| {
             self.drawMesh(mesh, scene_data);
         }
@@ -572,8 +583,18 @@ const RasterState = struct {
         gl.programUniformMatrix4fv(self.vshader, 0, 1, gl.FALSE, zm.arrNPtr(&mesh.transform));
         gl.programUniformMatrix3fv(self.vshader, 3, 1, gl.FALSE, &mesh.normal_matrix);
 
+        gl.enable(gl.CULL_FACE);
+        gl.cullFace(gl.BACK);
+
         for (scene_data.primitives.items[mesh.primitives_start..mesh.primitives_end]) |*prim| {
             const material = &scene_data.materials.items[prim.material_index];
+
+            if (material.is_double_sided) {
+                gl.disable(gl.CULL_FACE);
+            } else {
+                gl.enable(gl.CULL_FACE);
+            }
+
             self.setMaterialUniformsPBR(material, scene_data);
 
             gl.drawElementsBaseVertex(
@@ -800,7 +821,7 @@ const SceneData = struct {
         return self;
     }
 
-    pub fn uploadDataToGPU(self: *const SceneData, tmp: Allocator) ![3]u32 {
+    pub fn uploadDataToGPU(self: *const SceneData, tmp: Allocator) ![4]u32 {
         const GPUBLAS = extern struct {
             aabb_min: [3]f32,
             root_idx: u32,
@@ -847,21 +868,10 @@ const SceneData = struct {
             }
         }
 
-        var buffer_handles: [3]u32 = undefined;
+        var buffer_handles: [4]u32 = undefined;
         gl.createBuffers(buffer_handles.len, &buffer_handles);
 
-        const mesh_transforms = try tmp.alloc(f32, self.meshes.items.len * 16);
-        defer tmp.free(mesh_transforms);
-
-        for (self.meshes.items, 0..) |*mesh, idx| {
-            zm.storeMat(mesh_transforms[idx * 16 .. (idx + 1) * 16], zm.inverse(mesh.transform));
-        }
-
-        {
-            const buffer_size = @sizeOf(f32) * 16 * mesh_transforms.len;
-            const mesh_transform_handle = buffer_handles[1];
-            gl.namedBufferStorage(mesh_transform_handle, @intCast(buffer_size), mesh_transforms.ptr, 0);
-        }
+        try self.uploadTransforms(tmp, buffer_handles[3], buffer_handles[1]);
 
         {
             const primitive_handle = buffer_handles[0];
@@ -870,6 +880,14 @@ const SceneData = struct {
         }
 
         {
+            const Flags = packed struct(u32) {
+                double_sided: bool = false,
+                has_normal_texture: bool = false,
+                has_metallic_roughness_texture: bool = false,
+                has_base_color_texture: bool = false,
+                pad: u28 = undefined,
+            };
+
             const GPUMaterial = extern struct {
                 base_color_factor: [4]f32,
                 base_color_texture: u64 = std.math.maxInt(u64),
@@ -877,7 +895,7 @@ const SceneData = struct {
                 normal_map_texture: u64 = std.math.maxInt(u64),
                 metallic_factor: f32,
                 roughness_factor: f32,
-                flags: u32 = 0,
+                flags: Flags = .{},
                 pad: [3]f32 = undefined,
             };
 
@@ -896,18 +914,22 @@ const SceneData = struct {
                     const tex = self.texure_handles.items[info.index];
                     gpu_material.base_color_texture = gl.GL_ARB_bindless_texture.getTextureHandleARB(tex);
                     gl.GL_ARB_bindless_texture.makeTextureHandleResidentARB(gpu_material.base_color_texture);
+                    gpu_material.flags.has_base_color_texture = true;
                 }
                 if (cpu_material.metallic_roughness.metallic_roughness_texture) |info| {
                     const tex = self.texure_handles.items[info.index];
                     gpu_material.metallic_roughness_texture = gl.GL_ARB_bindless_texture.getTextureHandleARB(tex);
                     gl.GL_ARB_bindless_texture.makeTextureHandleResidentARB(gpu_material.metallic_roughness_texture);
+                    gpu_material.flags.has_metallic_roughness_texture = true;
                 }
                 if (cpu_material.normal_texture) |info| {
                     const tex = self.texure_handles.items[info.index];
                     gpu_material.normal_map_texture = gl.GL_ARB_bindless_texture.getTextureHandleARB(tex);
                     gl.GL_ARB_bindless_texture.makeTextureHandleResidentARB(gpu_material.normal_map_texture);
-                    gpu_material.flags = 1;
+                    gpu_material.flags.has_normal_texture = true;
                 }
+
+                gpu_material.flags.double_sided = cpu_material.is_double_sided;
             }
 
             const handle = buffer_handles[2];
@@ -916,6 +938,26 @@ const SceneData = struct {
         }
 
         return buffer_handles;
+    }
+
+    pub fn uploadTransforms(self: *const SceneData, tmp: Allocator, normal_matricies_handle: u32, mesh_transforms_handle: u32) !void {
+        const mesh_transforms = try tmp.alloc(f32, self.meshes.items.len * 16);
+        defer tmp.free(mesh_transforms);
+
+        const normal_matricies = try tmp.alloc(f32, self.meshes.items.len * 12);
+        defer tmp.free(normal_matricies);
+
+        for (self.meshes.items, 0..) |*mesh, idx| {
+            zm.storeMat(mesh_transforms[idx * 16 .. (idx + 1) * 16], zm.inverse(mesh.transform));
+            // TODO: Investiage the difference between this and a straight memcpy.
+            normal_matricies[idx * 12 .. (idx + 1) * 12][0..3].* = mesh.normal_matrix[0..3].*;
+            normal_matricies[idx * 12 .. (idx + 1) * 12][4..7].* = mesh.normal_matrix[3..6].*;
+            normal_matricies[idx * 12 .. (idx + 1) * 12][8..11].* = mesh.normal_matrix[6..9].*;
+        }
+
+        const buffer_size = @sizeOf(f32) * mesh_transforms.len;
+        gl.namedBufferStorage(mesh_transforms_handle, @intCast(buffer_size), mesh_transforms.ptr, 0);
+        gl.namedBufferStorage(normal_matricies_handle, @intCast(@sizeOf(f32) * normal_matricies.len), normal_matricies.ptr, 0);
     }
 
     pub fn constructBVH(self: *SceneData, tmp: Allocator) !void {

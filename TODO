@@ -6,3 +6,5 @@ Features
 0. Support for cubemaps.
 1. Support for emisson
 2. Support for alpha blending
+
+Turn on sRGB for rasterization again.

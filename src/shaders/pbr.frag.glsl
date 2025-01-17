@@ -120,7 +120,7 @@ vec3 get_normal() {
         vec3 normal_map = texture(s_normal_map, v_uv).rgb * 2 - 1.0;
         return normalize(v_TBN * normal_map);
     } 
-    return  normalize(v_normal);
+    return normalize(v_normal);
 }
 
 void main() {
@@ -133,6 +133,8 @@ void main() {
     float ao = get_occlusion();
 
     vec3 N = get_normal();
+    frag_color = vec4((N + 1) * 0.5, 1.0);
+    return;
     vec3 V = normalize(camera_pos - v_frag_pos);
 
     vec3 Lo = vec3(0.0);
