@@ -812,9 +812,15 @@ const SceneData = struct {
         }
 
         // TEMP.
-        var transform = zm.mul(zm.rotationY(0.5 * std.math.pi), zm.scalingV(@splat(0.75)));
-        transform = zm.mul(transform, zm.translation(0, 1, 0));
-        self.meshes.items[0].setTransform(transform);
+        {
+            var transform = zm.mul(zm.rotationY(0.5 * std.math.pi), zm.scalingV(@splat(0.75)));
+            transform = zm.mul(transform, zm.translation(0, 1, 0));
+            self.meshes.items[0].setTransform(transform);
+        }
+        //if (self.meshes.items.len > 1) {
+        //    const transform = zm.mul(zm.scalingV(@splat(0.3)), zm.translation(1.5, 1, 0));
+        //    self.meshes.items[1].setTransform(transform);
+        //}
 
         try self.constructBVH(tmp_alloc);
 
@@ -890,11 +896,13 @@ const SceneData = struct {
 
             const GPUMaterial = extern struct {
                 base_color_factor: [4]f32,
+                emissive_factor: [3]f32,
+                metallic_factor: f32,
                 base_color_texture: u64 = std.math.maxInt(u64),
                 metallic_roughness_texture: u64 = std.math.maxInt(u64),
                 normal_map_texture: u64 = std.math.maxInt(u64),
-                metallic_factor: f32,
                 roughness_factor: f32,
+                emissive_strength: f32,
                 flags: Flags = .{},
                 pad: [3]f32 = undefined,
             };
@@ -907,6 +915,8 @@ const SceneData = struct {
                     .base_color_factor = cpu_material.metallic_roughness.base_color_factor,
                     .metallic_factor = cpu_material.metallic_roughness.metallic_factor,
                     .roughness_factor = cpu_material.metallic_roughness.roughness_factor,
+                    .emissive_factor = cpu_material.emissive_factor,
+                    .emissive_strength = cpu_material.emissive_strength,
                 };
 
                 // Make bindless handles.
